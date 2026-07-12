@@ -12,6 +12,7 @@ from matching import (
     extract_ner_skills,
     get_missing_skills
 )
+from ats_checker import run_ats_analysis
 
 # -----------------------------------------------------------------------------
 # 1. PAGE SETUP & CONFIGURATION
@@ -349,6 +350,69 @@ st.markdown("""
             border-color: var(--primary-hover) !important;
             color: var(--primary-hover) !important;
         }
+
+        /* ---------- ATS Score Checker ---------- */
+        .ats-section-title {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            font-weight: 800;
+            font-size: 1.5rem;
+            color: #1E293B;
+            text-align: center;
+            margin-bottom: 0.35rem;
+        }
+        .ats-section-caption {
+            font-family: 'Inter', sans-serif;
+            font-size: 13px;
+            color: var(--text-muted);
+            text-align: center;
+            margin-bottom: 1.75rem;
+        }
+        .ats-check-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 0.85rem 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .ats-check-row:last-child {
+            border-bottom: none;
+        }
+        .ats-check-icon {
+            flex-shrink: 0;
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 700;
+            margin-top: 2px;
+        }
+        .ats-icon-pass { background: #F0FDFA; color: #0D9488; }
+        .ats-icon-warning { background: #FFFBEB; color: #D97706; }
+        .ats-icon-fail { background: #FFF1F2; color: #E11D48; }
+        .ats-check-name {
+            font-family: 'Inter', sans-serif;
+            font-weight: 700;
+            font-size: 13.5px;
+            color: #1E293B;
+            margin-bottom: 2px;
+        }
+        .ats-check-message {
+            font-family: 'Inter', sans-serif;
+            font-size: 12.5px;
+            color: #475569;
+            line-height: 1.5;
+        }
+        .ats-check-fix {
+            font-family: 'Inter', sans-serif;
+            font-size: 12px;
+            font-style: italic;
+            color: #64748B;
+            margin-top: 4px;
+            line-height: 1.5;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -438,6 +502,46 @@ def render_verdict_stamp(score):
             <div class="score-label">Compatibility Index</div>
         </div>
     """, unsafe_allow_html=True)
+
+
+def render_ats_score(score):
+    """Renders the overall ATS compatibility score as a color-coded card."""
+    if score >= 85:
+        verdict, color, bg_color, border_color = "Excellent", "#0D9488", "#F0FDFA", "#CCFBF1"
+    elif score >= 65:
+        verdict, color, bg_color, border_color = "Good", "#0D9488", "#F0FDFA", "#CCFBF1"
+    elif score >= 40:
+        verdict, color, bg_color, border_color = "Needs Improvement", "#D97706", "#FFFBEB", "#FEF3C7"
+    else:
+        verdict, color, bg_color, border_color = "Poor", "#E11D48", "#FFF1F2", "#FFE4E6"
+
+    st.markdown(f"""
+        <div class="score-card" style="background-color: {bg_color}; border-color: {border_color};">
+            <div class="score-value" style="color: {color};">{score}/100</div>
+            <div class="score-verdict" style="color: {color};">{verdict}</div>
+            <div class="score-label">ATS Compatibility Score</div>
+        </div>
+    """, unsafe_allow_html=True)
+
+
+def render_ats_checks(checks):
+    """Renders each individual ATS check as a row with a status icon and details."""
+    icon_map = {"pass": ("&#10003;", "ats-icon-pass"), "warning": ("!", "ats-icon-warning"), "fail": ("&#10007;", "ats-icon-fail")}
+    rows = []
+    for check in checks:
+        icon_char, icon_class = icon_map[check["status"]]
+        fix_html = f'<div class="ats-check-fix">Fix: {check["fix"]}</div>' if check.get("fix") else ""
+        rows.append(f"""
+            <div class="ats-check-row">
+                <div class="ats-check-icon {icon_class}">{icon_char}</div>
+                <div>
+                    <div class="ats-check-name">{check['name']}</div>
+                    <div class="ats-check-message">{check['message']}</div>
+                    {fix_html}
+                </div>
+            </div>
+        """)
+    st.markdown("".join(rows), unsafe_allow_html=True)
 
 
 def generate_tailored_resume_llm(original_resume, jd_text, matched_skills, missing_skills):
@@ -583,6 +687,13 @@ with col_input:
         "Resume (PDF)",
         type=["pdf"],
         help="Upload the candidate resume in PDF format."
+    )
+
+    ats_check_button = st.button(
+        "Check ATS Score",
+        type="secondary",
+        key="run_ats",
+        help="Runs a general ATS compatibility check on the resume alone — no job description needed."
     )
 
     st.markdown('<div style="margin-bottom: 1rem;"></div>', unsafe_allow_html=True)
@@ -785,3 +896,41 @@ with col_results:
                 then run the analysis to view results here.
             </div>
         """, unsafe_allow_html=True)
+
+# -----------------------------------------------------------------------------
+# 7. ATS COMPATIBILITY CHECK (independent of job-description matching)
+# -----------------------------------------------------------------------------
+if "ats_analyzed" not in st.session_state:
+    st.session_state.ats_analyzed = False
+    st.session_state.ats_score = 0
+    st.session_state.ats_checks = []
+
+if ats_check_button:
+    if not uploaded_file:
+        st.error("Please upload a resume PDF before running the ATS check.")
+    else:
+        with st.spinner("Running ATS compatibility checks..."):
+            uploaded_file.seek(0)
+            raw_text_for_ats = extract_text_from_pdf(uploaded_file)
+
+            if not raw_text_for_ats.strip():
+                st.error("Could not read text from this PDF. Make sure it isn't a scanned image.")
+            else:
+                score, checks = run_ats_analysis(uploaded_file, raw_text_for_ats, uploaded_file.name)
+                st.session_state.ats_score = score
+                st.session_state.ats_checks = checks
+                st.session_state.ats_analyzed = True
+
+if st.session_state.ats_analyzed:
+    st.markdown('<hr class="subtle-divider">', unsafe_allow_html=True)
+    st.markdown('<div class="ats-section-title">ATS Compatibility Check</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ats-section-caption">A general resume health check, independent of any specific job description.</div>', unsafe_allow_html=True)
+
+    ats_col_score, ats_col_details = st.columns([1, 1.6], gap="large")
+
+    with ats_col_score:
+        render_ats_score(st.session_state.ats_score)
+
+    with ats_col_details:
+        render_ats_checks(st.session_state.ats_checks)
+
